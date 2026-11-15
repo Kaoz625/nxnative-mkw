@@ -175,9 +175,11 @@ def is_nup(path):
 def scan(n):
     """What a NUP holds: (title ID, base package, {update version: package}, {DLC title ID: package}), with the checks pack_dump.scan makes"""
     bases = [k for k in n.packages if k.kind == BASE]
-    if not bases:
+    updates = [k for k in n.packages if k.kind == UPDATE]
+    # blz 15 Nov (from upstream seedds/nxnative pack_nup.py): a container with no base whose updates are all marked standalone_update (SPEC 3.1.2) is the whole game
+    if not bases and (not updates or any(not k.flags & STANDALONE for k in updates)):
         raise Error(f'{n.path}: no base game, only ' + (', '.join(sorted({KINDS[k.kind] for k in n.packages}))) + ' packages: pack the base game and its update into one NUP')
-    base = bases[0]
+    base = bases[0] if bases else None
     if len(bases) > 1: raise Error(f'{n.path}: {len(bases)} base packages')
     # Dumps can leave an empty base placeholder and put the complete game in an update.
     # Identify it from the code actually present; each selected version is checked by pack_version.
@@ -267,7 +269,7 @@ def control(k, out):   # the package's control data beside its ExeFS, as nx_extr
 
 
 def romfs_of(k, base):   # the RomFS folder a version runs with: its own, or the base game's for an update without one
-    d = k.romfs if k.romfs != NO_DIR else base.romfs
+    d = k.romfs if k.romfs != NO_DIR else (base.romfs if base else NO_DIR)
     if d == NO_DIR: raise Error(f'{k.name}: no romfs/ in this package or the base game')
     return d
 
