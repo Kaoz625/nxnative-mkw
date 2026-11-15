@@ -640,7 +640,7 @@ def nsp_versions(fam, builds):
 
 def pick_nsps(fam, have, versions):
     """For each version to extract, (base game, update or None): v0 = the base game alone, v<N> = the base game + the update with version number N"""
-    say(f'base: {fam["base"].name}')
+    if fam['base'] is not None: say(f'base: {fam["base"].name}')   # blz: a NUP of standalone updates has no base (as seedds/nxnative)
     out = {}
     for ver in versions:
         if ver not in have: raise BuildError(f'no NSP for update {ver} (the game profile needs these versions: {", ".join(versions)})')
