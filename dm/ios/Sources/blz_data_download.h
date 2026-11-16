@@ -6,6 +6,7 @@
 //   line 1  https URL of the file that holds the image
 //   line 2  size of the image in bytes
 //   line 3  (optional) byte offset of the image inside that file - an image stored uncompressed in a zip/IPA can be served from it
+// Without that file: BLZ_DATA_URL / BLZ_DATA_SIZE / BLZ_DATA_OFFSET from dm/env.txt (the build script's --env-file).
 // The download goes to Documents/romfs.img.dl with HTTP Range requests, continues where it stopped (app closed, network lost),
 // checks free space first, and is renamed to Documents/romfs.img only when the image is complete and has the identity in romfs.id.
 #import <UIKit/UIKit.h>
@@ -15,7 +16,12 @@ typedef struct { char url[1024]; long long size, offset; } blz_data_spec;
 static int blz_data_spec_read(blz_data_spec *s) {
     NSString *p = [[NSBundle.mainBundle.resourcePath stringByAppendingPathComponent:@"dm"] stringByAppendingPathComponent:@"blz_data.txt"];
     NSString *t = [NSString stringWithContentsOfFile:p encoding:NSUTF8StringEncoding error:nil];
-    if (!t) return 0;
+    if (!t) {   // or the same three values from an env file (the build script's --env-file becomes dm/env.txt): BLZ_DATA_URL, BLZ_DATA_SIZE, BLZ_DATA_OFFSET
+        const char *u = getenv("BLZ_DATA_URL"), *z = getenv("BLZ_DATA_SIZE"), *o = getenv("BLZ_DATA_OFFSET");
+        if (!u || !z || strncmp(u, "https://", 8) || strlen(u) >= sizeof s->url) return 0;
+        memset(s, 0, sizeof *s); strlcpy(s->url, u, sizeof s->url); s->size = atoll(z); s->offset = o ? atoll(o) : 0;
+        return s->size > 0 && s->offset >= 0;
+    }
     NSMutableArray<NSString *> *rows = [NSMutableArray array];
     for (NSString *raw in [t componentsSeparatedByCharactersInSet:NSCharacterSet.newlineCharacterSet]) {
         NSString *l = [raw stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
