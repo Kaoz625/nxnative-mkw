@@ -306,6 +306,9 @@ void front_ios_boot(void) {   // Called by front_ios.m once the window and Metal
 }
 int front_ios_boot_ok(void) { return g_boot_ok; }
 
+static int boot_env(void);
+#include "blz_data_download.h"   // blz: a slim build downloads its game file image itself on the first start (dm/blz_data.txt)
+
 @interface App : UIResponder <UIApplicationDelegate>
 @end
 @implementation App
@@ -321,7 +324,14 @@ int front_ios_boot_ok(void) { return g_boot_ok; }
 @implementation SceneDelegate
 - (void)scene:(UIScene *)scene willConnectToSession:(UISceneSession *)session options:(UISceneConnectionOptions *)o {
     self.window = [[UIWindow alloc] initWithWindowScene:(UIWindowScene *)scene];
-    self.window.rootViewController = front_ios_root();
+    blz_data_spec spec;
+    if (!g_boot_ok && blz_data_spec_read(&spec)) {   // blz: no usable game files and the build names where they are: fetch them, then boot as usual
+        __weak SceneDelegate *me = self;
+        self.window.rootViewController = [[BlzDataVC alloc] initWithSpec:spec done:^{
+            g_boot_ok = boot_env();
+            me.window.rootViewController = front_ios_root();   // with the game files: the launcher or the game; without: the usual hint
+        }];
+    } else self.window.rootViewController = front_ios_root();
     [self.window makeKeyAndVisible];
 }
 - (void)sceneWillResignActive:(UIScene *)s { front_ios_focus_event(0); }
