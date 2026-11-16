@@ -13,6 +13,8 @@
 #include <os/proc.h>
 #include "game_profile.h"   // game profile constants (the RomFS marker path)
 #include "front.h"
+#include <sys/sysctl.h>
+#include <sys/time.h>
 #include "romfs_image.h"
 #include "romfs_identity.h"
 #include "player_env.h"
@@ -182,6 +184,27 @@ static int boot_env(void) {
     NSString *log = [doc stringByAppendingPathComponent:@"log.txt"], *prev = [doc stringByAppendingPathComponent:@"log.prev.txt"];
     [fm removeItemAtPath:prev error:nil]; [fm moveItemAtPath:log toPath:prev error:nil];
     if (freopen(log.fileSystemRepresentation, "w", stderr)) setvbuf(stderr, NULL, _IOLBF, 0);
+    // blz (15 Nov 2026, tap-to-game timing): DM_LOG_TIME=1 (launch environment) puts the seconds since the process started in front of every log line, through a pipe
+    // read by one thread, so each start phase can be timed from log.txt alone
+    if (getenv("DM_LOG_TIME") && atoi(getenv("DM_LOG_TIME")) > 0) {
+        int pp[2], filefd = dup(fileno(stderr));
+        struct kinfo_proc kp; size_t kl = sizeof kp; int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_PID, getpid()};
+        struct timeval now; gettimeofday(&now, NULL);
+        double start = (!sysctl(mib, 4, &kp, &kl, NULL, 0)) ? kp.kp_proc.p_starttime.tv_sec + kp.kp_proc.p_starttime.tv_usec / 1e6 : now.tv_sec + now.tv_usec / 1e6;
+        if (filefd >= 0 && !pipe(pp) && dup2(pp[1], 2) >= 0) {
+            close(pp[1]); setvbuf(stderr, NULL, _IOLBF, 0);
+            int rd = pp[0];
+            [NSThread detachNewThreadWithBlock:^{
+                FILE *in = fdopen(rd, "r"), *out = fdopen(filefd, "w"); char line[4096]; int bol = 1;
+                if (!in || !out) return;
+                setvbuf(out, NULL, _IOLBF, 0);
+                while (fgets(line, sizeof line, in)) {
+                    if (bol) { struct timeval t; gettimeofday(&t, NULL); fprintf(out, "%8.3f ", t.tv_sec + t.tv_usec / 1e6 - start); }
+                    fputs(line, out); bol = line[strlen(line) - 1] == '\n';
+                }
+            }];
+        }
+    }
     // Environment switch files (for on-device diagnostics: a sideloaded app cannot be given environment variables from outside): one KEY=VALUE per line, # starts a comment; Documents/env.txt takes precedence over dm/env.txt in the bundle (put there by build_ipa.sh's DM_ENV_FILE)
     NSMutableArray<NSString *> *from_file = [NSMutableArray array], *from_launch = [NSMutableArray array];
     for (char **e = environ; *e; e++) {   // set at launch (Xcode, devicectl): before the env files, and the launcher keeps them
