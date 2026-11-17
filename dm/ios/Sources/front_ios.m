@@ -195,7 +195,12 @@ static void front_ios_power_watch(void) {
     // Test switch DM_BRIGHTNESS=0.05..1.0: sets the screen brightness for this run, to measure the display's share of the heat. iOS keeps an app's value until the phone locks,
     // so a test puts the logged old value back with a second short start
     const char *br = getenv("DM_BRIGHTNESS");
-    if (br) { double v = atof(br); if (v >= 0.05 && v <= 1.0) { LOG("front end: screen brightness %.2f → %.2f (DM_BRIGHTNESS)", (double)UIScreen.mainScreen.brightness, v); UIScreen.mainScreen.brightness = v; } }
+    // Set at launch the value was ignored on iOS 26 (17 Nov: read back 0.80 at once and all run): set it again 3 s and 10 s later on the main queue, on the key window's screen, and log the read-back
+    if (br) { double v = atof(br); if (v >= 0.05 && v <= 1.0) { LOG("front end: screen brightness %.2f → %.2f (DM_BRIGHTNESS)", (double)UIScreen.mainScreen.brightness, v); UIScreen.mainScreen.brightness = v;
+        for (int k = 0; k < 2; k++) dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (k ? 10 : 3) * (int64_t)NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+            UIScreen *sc = UIScreen.mainScreen;
+            for (UIScene *s in UIApplication.sharedApplication.connectedScenes) if ([s isKindOfClass:UIWindowScene.class]) { sc = ((UIWindowScene *)s).screen; break; }
+            sc.brightness = v; g_brightness = sc.brightness; LOG("front end: screen brightness set again to %.2f, reads %.2f", v, g_brightness); }); } }
     g_brightness = UIScreen.mainScreen.brightness;
     [NSNotificationCenter.defaultCenter addObserverForName:UIScreenBrightnessDidChangeNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) { (void)n; g_brightness = UIScreen.mainScreen.brightness; }];
     [NSNotificationCenter.defaultCenter addObserverForName:NSProcessInfoThermalStateDidChangeNotification object:nil queue:nil usingBlock:^(NSNotification *n) {
