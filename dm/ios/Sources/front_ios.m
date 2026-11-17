@@ -192,6 +192,10 @@ int dm_thermal_now(void) { return (int)NSProcessInfo.processInfo.thermalState; }
 int dm_low_power_now(void) { return NSProcessInfo.processInfo.lowPowerModeEnabled; }   // the frame step does not probe in it (hle_nvn.c fstep_cpu_slowed)
 double dm_brightness_now(void) { return g_brightness; }
 static void front_ios_power_watch(void) {
+    // Test switch DM_BRIGHTNESS=0.05..1.0: sets the screen brightness for this run, to measure the display's share of the heat. iOS keeps an app's value until the phone locks,
+    // so a test puts the logged old value back with a second short start
+    const char *br = getenv("DM_BRIGHTNESS");
+    if (br) { double v = atof(br); if (v >= 0.05 && v <= 1.0) { LOG("front end: screen brightness %.2f → %.2f (DM_BRIGHTNESS)", (double)UIScreen.mainScreen.brightness, v); UIScreen.mainScreen.brightness = v; } }
     g_brightness = UIScreen.mainScreen.brightness;
     [NSNotificationCenter.defaultCenter addObserverForName:UIScreenBrightnessDidChangeNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) { (void)n; g_brightness = UIScreen.mainScreen.brightness; }];
     [NSNotificationCenter.defaultCenter addObserverForName:NSProcessInfoThermalStateDidChangeNotification object:nil queue:nil usingBlock:^(NSNotification *n) {
