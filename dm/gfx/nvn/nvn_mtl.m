@@ -94,6 +94,16 @@ static int g_classic_ok, g_classic;   // mtl_device_classic was asked / the devi
 static dispatch_queue_t g_feedback_q;
 static _Atomic uint32_t g_present_qos;
 #define ALLOC_MAX 8
+// Memory-lean switches (17 Nov 2026, from the cut list of the 2 GB Apple TV Ocarina of Time build, r/decomps): defaults unchanged. DM_NVN_MEM_LEAN=1 turns all four to the lean value,
+// each one alone overrides it: DM_NVN_UP_BLOCK_MB (upload staging block, 32 -> 8), DM_NVN_UP_BATCH_MB (overflow staging per upload batch, 128 -> 16), DM_NVN_STG_KEEP (free 16 MB scratch
+// blocks kept for reuse, 8 -> 2: larger completed scratch is given back), DM_NVN_ALLOC_MAX (main command allocators, 8 -> 2; at most 8)
+static int lean_get(const char *name, int dflt, int lean, int lo, int hi) {
+    static int lean_on = -1; if (lean_on < 0) { const char *e = getenv("DM_NVN_MEM_LEAN"); lean_on = e && atoi(e) > 0; }
+    const char *e = getenv(name); int v = e && *e ? atoi(e) : lean_on ? lean : dflt; if (v < lo) v = lo; if (v > hi) v = hi;
+    if (v != dflt) MLOG("memory-lean switch: %s = %d (default %d)", name, v, dflt);
+    return v;
+}
+static int alloc_cap(void) { static int v; if (!v) v = lean_get("DM_NVN_ALLOC_MAX", ALLOC_MAX, 2, 2, ALLOC_MAX); return v; }
 static id<MTL4CommandAllocator> g_alloc4[ALLOC_MAX]; static int g_alloc_n, g_alloc_cur;   // Command allocator pool of the main submission: at start pick one the GPU has finished with, create a new one if there is none (wait only at the cap)
 static id<MTL4CommandAllocator> g_up_alloc4[3];
 static id<MTL4CommandAllocator> g_present_alloc4[3];
@@ -448,6 +458,7 @@ void mtl_init(void) {
         pad.label = [NSString stringWithFormat:@"nvn-mtl present allocator %d", i];
         g_present_alloc4[i] = [g_dev newCommandAllocatorWithDescriptor:pad error:&ae];
         if (!g_present_alloc4[i]) MDIE("failed to create present MTL4CommandAllocator[%d]: %s", i, ae.localizedDescription.UTF8String);
+        if (i == 2 && alloc_cap() < 3) g_alloc_n = alloc_cap();   // DM_NVN_ALLOC_MAX=2: the main ring uses two (the third object stays empty; an allocator holds memory only once used)
         g_present_cb[i] = [g_dev newCommandBuffer];
         if (!g_present_cb[i]) MDIE("failed to create present MTL4CommandBuffer[%d]", i);
     }
@@ -911,7 +922,7 @@ void mtl_sub_begin(void) {
     // pick an allocator the GPU has finished with; if all are in use create a new one; only at the cap wait for the oldest one. How far ahead it runs is bounded by the wait where the game acquires the swapchain texture, same as the old interface.
     int alloc_i = -1; uint64_t done = g_done;
     for (int i = 0; i < g_alloc_n; i++) if (g_alloc_fence[i] <= done) { alloc_i = i; break; }
-    if (alloc_i < 0 && g_alloc_n < ALLOC_MAX) { NSError *ae = nil; MTL4CommandAllocatorDescriptor *ad = [MTL4CommandAllocatorDescriptor new];
+    if (alloc_i < 0 && g_alloc_n < alloc_cap()) { NSError *ae = nil; MTL4CommandAllocatorDescriptor *ad = [MTL4CommandAllocatorDescriptor new];
         g_alloc4[g_alloc_n] = [g_dev newCommandAllocatorWithDescriptor:ad error:&ae]; if (!g_alloc4[g_alloc_n]) MDIE("failed to create a new MTL4CommandAllocator: %s", ae.localizedDescription.UTF8String);
         alloc_i = g_alloc_n++; g_alloc_grown++; }
     if (alloc_i < 0) { alloc_i = 0; for (int i = 1; i < g_alloc_n; i++) if (g_alloc_fence[i] < g_alloc_fence[alloc_i]) alloc_i = i; g_alloc_waits++; mtl_wait_at(g_alloc_fence[alloc_i], UINT64_MAX, WS_ALLOC); }
@@ -2493,7 +2504,8 @@ static void up_wait_zero(_Atomic int *v, int site) {
     if (ws_on()) ws_put(site, w0, 1);
 }
 static unsigned g_up_seq;
-#define UP_BLOCK_SIZE (32u * 1024u * 1024u)
+static size_t up_block_size(void) { static size_t v; if (!v) v = (size_t)lean_get("DM_NVN_UP_BLOCK_MB", 32, 8, 4, 64) << 20; return v; }
+#define UP_BLOCK_SIZE up_block_size()
 // Each upload slot keeps its staging resident until its next batch (up_begin waits for the previous batch). Grow the first block to the slot's previous batch demand, not just its first texture:
 // a small first texture followed by a large one otherwise allocates and retires a fresh 32 MB overflow every frame. Keep one overflow as well, at most 64 MB per slot / 192 MB across all three.
 // Bursts beyond that budget and individual uploads larger than UP_BLOCK_SIZE still use temporary blocks, retired only after their GPU work. DM_NVN_UPLOAD_REUSE=0 keeps the original one-block policy.
@@ -2519,7 +2531,8 @@ static NSMutableArray *g_up_keep;
 // batches; up_begin publishes queued commits before waiting for a slot. A single
 // texture larger than the budget gets its own block (uploads are not tiled here).
 static size_t g_up_staging_bytes;
-#define UP_BATCH_BYTES (128u * 1024u * 1024u)
+static size_t up_batch_bytes(void) { static size_t v; if (!v) v = (size_t)lean_get("DM_NVN_UP_BATCH_MB", 128, 16, 8, 512) << 20; return v; }
+#define UP_BATCH_BYTES up_batch_bytes()
 
 
 // The upload command buffer was discarded by the system (dropped along during GPU error recovery; the first frame on entering Travincal drops one every run): the objects of this batch of textures are built and the timestamps updated, but the content was never written in,
@@ -2796,7 +2809,8 @@ static int sp_heap_take(int need, NvSpHeap **hp, NSUInteger *off) {   // need co
 // The 16 MB blocks are recycled (stg_recycle): a new block per upload batch was ~190 new 16 MB buffers every 300 frames in an iPhone race (MKW's snapshot uploads and sparse tiles),
 // each zero-filled by the kernel and added to / removed from the residency set (3 GB of residency churn per 5 s, ~1.7 ms a frame of commits on the submit thread)
 #define STG_BLOCK ((size_t)16 << 20)
-#define STG_KEEP 8
+static int stg_keep(void) { static int v = -1; if (v < 0) v = lean_get("DM_NVN_STG_KEEP", 8, 2, 0, 64); return v; }
+#define STG_KEEP stg_keep()
 static NSMutableArray *g_stg_free; static NSHashTable *g_stg_mine; static os_unfair_lock g_stg_lk = OS_UNFAIR_LOCK_INIT; static _Atomic uint64_t g_stg_reused, g_stg_made;
 // Upload batch completion: a recyclable block goes back to the free list (it stays resident); returns 1 when taken
 static int stg_recycle(id obj) {
