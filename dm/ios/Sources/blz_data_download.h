@@ -8,7 +8,7 @@
 //   line 3  (optional) byte offset of the image inside that file - an image stored uncompressed in a zip/IPA can be served from it
 // Without that file: BLZ_DATA_URL / BLZ_DATA_SIZE / BLZ_DATA_OFFSET from dm/env.txt (the build script's --env-file).
 // The download goes to Documents/romfs.img.dl with HTTP Range requests, continues where it stopped (app closed, network lost),
-// checks free space first, and is renamed to Documents/romfs.img only when the image is complete and has the identity in romfs.id.
+// checks free space first (roomFor: the rest of the image + 500 MB must fit, else a message with the numbers and no download), and is renamed to Documents/romfs.img only when the image is complete and has the identity in romfs.id.
 #import <UIKit/UIKit.h>
 
 typedef struct { char url[1024]; long long size, offset; } blz_data_spec;
@@ -36,12 +36,13 @@ static int blz_data_spec_read(blz_data_spec *s) {
 
 @interface BlzDataVC : UIViewController <NSURLSessionDataDelegate>
 - (instancetype)initWithSpec:(blz_data_spec)spec done:(void (^)(void))done;
+- (void)setRoomTest;
 @end
 
 @implementation BlzDataVC {
     blz_data_spec _spec; void (^_done)(void);
     NSURLSession *_session; NSURLSessionDataTask *_task;
-    int _fd; long long _have; int _failed, _finished, _responseOK;
+    int _fd; long long _have; int _failed, _finished, _responseOK, _noRoom, _roomSaid, _roomTest;
     UILabel *_title, *_status; UIProgressView *_bar;
     CFAbsoluteTime _lastUI, _rateT; long long _rateBytes; double _rate;
     NSString *_tmp, *_img;
@@ -50,6 +51,7 @@ static int blz_data_spec_read(blz_data_spec *s) {
     if ((self = [super initWithNibName:nil bundle:nil])) { _spec = spec; _done = [done copy]; _fd = -1; }
     return self;
 }
+- (void)setRoomTest { _roomTest = 1; }
 - (BOOL)prefersHomeIndicatorAutoHidden { return YES; }
 - (void)viewDidLoad {
     [super viewDidLoad];
@@ -83,9 +85,33 @@ static NSString *blz_gb(long long b) { return [NSString stringWithFormat:@"%.1f"
     dispatch_async(dispatch_get_main_queue(), ^{ self->_status.text = s; self->_bar.progress = p; });
 }
 - (void)retryIn:(double)sec { dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(sec * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ [self begin]; }); }
+// Free-room guard: the bytes still to fetch plus a 500 MB margin must fit before anything is asked for. The reading is the volume's
+// capacity for important usage (what iOS can give an app the user is waiting on: free space plus what it may clear); after a write that
+// failed for lack of room (_noRoom) the plain free space counts instead, so a too-hopeful reading cannot make the download loop.
+// Short of room: a plain message with the numbers, nothing is downloaded; begin tries again every 5 s, so it starts once room is there.
+- (BOOL)roomFor:(long long)left free:(long long *)freeOut {
+    NSNumber *imp = nil, *plain = nil; NSURL *dir = [NSURL fileURLWithPath:_tmp.stringByDeletingLastPathComponent];
+    [dir getResourceValue:&imp forKey:NSURLVolumeAvailableCapacityForImportantUsageKey error:nil];
+    [dir getResourceValue:&plain forKey:NSURLVolumeAvailableCapacityKey error:nil];
+    NSNumber *freeN = _noRoom && plain ? plain : imp ?: plain;
+    long long need = left + (500ll << 20), have = freeN ? freeN.longLongValue : 0;
+    if (freeOut) *freeOut = have;
+    if (!freeN || have >= need) return YES;
+    long long shortBy = need - have;
+    if (!_roomSaid) fprintf(stderr, "blz data: not enough room: needs %lld, free %lld (important usage %lld, plain %lld); nothing downloaded\n", need, have, imp.longLongValue, plain.longLongValue);
+    _roomSaid = 1;
+    NSString *up = shortBy >= 1000000000ll ? [NSString stringWithFormat:@"%.0f GB", ceil((double)shortBy / 1e9)] : [NSString stringWithFormat:@"%.0f MB", ceil((double)shortBy / 1e8) * 100];
+    [self say:[NSString stringWithFormat:@"Not enough room on this %@.\nNeeds %@ GB, %@ GB free.\nFree up %@ and open the game again.", UIDevice.currentDevice.model, blz_gb(need), blz_gb(have), up]
+     progress:(float)((double)_have / (double)_spec.size)];
+    return NO;
+}
 // One attempt: open the partial file, check the free space, ask for the rest
 - (void)begin {
     if (_finished) return;
+    if (_roomTest) {   // BLZ_DATA_ROOM_TEST=<bytes> (launch environment): only the free-room guard for an image of that size; no file is opened, nothing is downloaded
+        long long f = 0; if ([self roomFor:_spec.size free:&f]) { fprintf(stderr, "blz data: room test: %lld bytes would fit (free %lld)\n", _spec.size, f); [self say:[NSString stringWithFormat:@"Room test: %@ GB would fit, %@ GB free.", blz_gb(_spec.size), blz_gb(f)] progress:0]; }
+        return;
+    }
     if (_fd >= 0) { close(_fd); _fd = -1; }
     _fd = open(_tmp.fileSystemRepresentation, O_WRONLY | O_CREAT, 0644);
     if (_fd < 0) { [self say:[NSString stringWithFormat:@"Cannot write the game files (error %d).", errno] progress:0]; [self retryIn:5]; return; }
@@ -94,21 +120,14 @@ static NSString *blz_gb(long long b) { return [NSString stringWithFormat:@"%.1f"
     if (_have > _spec.size) { ftruncate(_fd, 0); _have = 0; }
     lseek(_fd, _have, SEEK_SET);
     if (_have == _spec.size) { [self finish]; return; }
-    NSNumber *freeN = nil;
-    [[NSURL fileURLWithPath:_tmp.stringByDeletingLastPathComponent] getResourceValue:&freeN forKey:NSURLVolumeAvailableCapacityForImportantUsageKey error:nil];
-    long long need = _spec.size - _have + (500ll << 20);
-    if (freeN && freeN.longLongValue < need) {
-        fprintf(stderr, "blz data: free space %lld < needed %lld\n", freeN.longLongValue, need);
-        [self say:[NSString stringWithFormat:@"Not enough free space on this device.\nThe game needs %@ GB more; %@ GB is free.\nFree up space - the download then starts by itself.", blz_gb(need), blz_gb(freeN.longLongValue)]
-         progress:(float)((double)_have / (double)_spec.size)];
-        [self retryIn:5]; return;
-    }
+    long long freeB = 0;
+    if (![self roomFor:_spec.size - _have free:&freeB]) { [self retryIn:5]; return; }
     NSMutableURLRequest *r = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:@(_spec.url)]];
     r.cachePolicy = NSURLRequestReloadIgnoringLocalAndRemoteCacheData;
     [r setValue:[NSString stringWithFormat:@"bytes=%lld-%lld", _spec.offset + _have, _spec.offset + _spec.size - 1] forHTTPHeaderField:@"Range"];
     [r setValue:@"identity" forHTTPHeaderField:@"Accept-Encoding"];
     _responseOK = 0; _rateT = CFAbsoluteTimeGetCurrent(); _rateBytes = _have;
-    fprintf(stderr, "blz data: request from byte %lld of %lld (free %lld)\n", _have, _spec.size, freeN.longLongValue);
+    fprintf(stderr, "blz data: request from byte %lld of %lld (free %lld)\n", _have, _spec.size, freeB);
     [self say:[NSString stringWithFormat:@"Downloading the game (only once): %@ of %@ GB", blz_gb(_have), blz_gb(_spec.size)] progress:(float)((double)_have / (double)_spec.size)];
     _task = [_session dataTaskWithRequest:r]; [_task resume];
 }
@@ -127,7 +146,7 @@ static NSString *blz_gb(long long b) { return [NSString stringWithFormat:@"%.1f"
         size_t off = 0;
         while (off < range.length) {
             ssize_t n = write(self->_fd, (const char *)bytes + off, range.length - off);
-            if (n < 0) { if (errno == EINTR) continue; bad = YES; *stop = YES; return; }
+            if (n < 0) { if (errno == EINTR) continue; if (errno == ENOSPC) self->_noRoom = 1; bad = YES; *stop = YES; return; }
             off += (size_t)n;
         }
     }];

@@ -325,7 +325,12 @@ static int boot_env(void);
 - (void)scene:(UIScene *)scene willConnectToSession:(UISceneSession *)session options:(UISceneConnectionOptions *)o {
     self.window = [[UIWindow alloc] initWithWindowScene:(UIWindowScene *)scene];
     blz_data_spec spec;
-    if (!g_boot_ok && blz_data_spec_read(&spec)) {   // blz: no usable game files and the build names where they are: fetch them, then boot as usual
+    const char *room_test = getenv("BLZ_DATA_ROOM_TEST");   // blz: show only the downloader's free-room guard for an image of this many bytes (no file touched, no download, the game does not start)
+    if (room_test && atoll(room_test) > 0) {
+        memset(&spec, 0, sizeof spec); spec.size = atoll(room_test);
+        BlzDataVC *vc = [[BlzDataVC alloc] initWithSpec:spec done:nil]; [vc setRoomTest];
+        self.window.rootViewController = vc;
+    } else if (!g_boot_ok && blz_data_spec_read(&spec)) {   // blz: no usable game files and the build names where they are: fetch them, then boot as usual
         __weak SceneDelegate *me = self;
         self.window.rootViewController = [[BlzDataVC alloc] initWithSpec:spec done:^{
             g_boot_ok = boot_env();
