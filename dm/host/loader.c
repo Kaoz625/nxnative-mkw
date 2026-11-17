@@ -321,11 +321,11 @@ void dm_fps_state_apply(void) {
     // Render scale of the 3D views (the stubs at Tears of the Kingdom's main+0xd5cc0, Breath of the Wild's main+0x1266880): 1.0 keeps the game's own size and dynamic resolution;
     // another factor fixes the size at that fraction (DM_RENDER_SCALE, 0.5 to 1.0). Independent of the frame step: written at target 0 too
     const char *rs = getenv("DM_RENDER_SCALE"); float sc = 1.0f;
-    if (rs) { char *end; sc = strtof(rs, &end); if (end == rs || *end || !(sc >= 0.5f && sc <= 1.0f)) { LOG("[RED] DM_RENDER_SCALE=%s: must be 0.5 to 1.0; keeping the game's size", rs); sc = 1.0f; } else LOG("%s: 3D views rendered at %.2f of the game's size (DM_RENDER_SCALE)", g_fps_mod, sc); }
+    if (rs) { char *end; sc = strtof(rs, &end); if (end == rs || *end || !(sc >= 0.3f && sc <= 1.0f)) { LOG("[RED] DM_RENDER_SCALE=%s: must be 0.3 to 1.0; keeping the game's size", rs); sc = 1.0f; } else LOG("%s: 3D views rendered at %.2f of the game's size (DM_RENDER_SCALE)", g_fps_mod, sc); }
     memcpy(dm_fps_state + 0x10, &sc, sizeof sc);
     // Present interval lock (+0x14; stubs that write the game's own interval: Mario Kart World's launcher Frame rate): 30 or 60, 0 = the game decides. A word of its own: DM_FPS_TARGET at +0 would also
     // switch on the host's frame step, which re-times and drops frames
-    const char *lk = getenv("DM_FPS_LOCK"); float lf = lk ? (float)atoi(lk) : 0.0f; if (lf != 30.0f && lf != 60.0f) lf = 0.0f;
+    const char *lk = getenv("DM_FPS_LOCK"); float lf = lk ? (float)atoi(lk) : 0.0f; if (lf != 15.0f && lf != 20.0f && lf != 30.0f && lf != 60.0f) lf = 0.0f;   // 20 and 15: 3 and 4 vsyncs, where the game's stub divides (Mario Kart World)
     memcpy(dm_fps_state + 0x14, &lf, sizeof lf); g_fps_lock = lf; if (lf) LOG("%s: present interval locked for %d fps (DM_FPS_LOCK)", g_fps_mod, (int)lf);
     char cap[32]; snprintf(cap, sizeof cap, ", capped at %d fps", t);
     LOG("%s: frame step %s%s (%s)", g_fps_mod, !t ? "as the game sets it" : "in whole vsyncs decided by the host", t ? cap : "", e ? "DM_FPS_TARGET" : "game profile fps_target");

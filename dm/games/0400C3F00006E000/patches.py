@@ -26,10 +26,11 @@ def frame_step(ctx):
     fs_put(0x25b6cbc, [B(0x25b6cbc, cc)], 'dynamic resolution: the scaler stores the host render scale'); ctx.render_scale = 1
     # Frame rate lock: the game picks its present interval (int at +0x214 of the display object) every frame from how late the last frame was (main+0x69cc64..0x69cce4: 1 or 2),
     # and its time step follows it, so a game that cannot keep 60 flips 1 <-> 2 every other frame. Where the state page's lock word (+0x14, DM_FPS_LOCK: the launcher's
-    # Frame rate; not the host's frame step target at +0), the stub writes the interval itself after that decision: 2 at 30 or less, 1 above; 0 / unset keeps the game's own choice
+    # Frame rate; not the host's frame step target at +0), the stub writes the interval itself after that decision: 60 / the lock in vsyncs (mov w16,#60; sdiv w8,w16,w8: 1 at 60,
+    # 2 at 30, 3 at 20, 4 at 15; the loader lets only those through); 0 / unset keeps the game's own choice. 20 and 15 are for a phone whose heat cap leaves no room for 30 (blz, 16 Nov 2026)
     fs_site(0x69ccf4, '7fb20839')
     start2 = here()
-    for i, w in enumerate((0xd503201f, 0xbd401610, 0x1e202208, 0x540000ed, 0x1e380208, 0x7100791f, 0x52800048, 0x52800030, 0x1a909108, 0xb9021668, 0x3908b27f, 0xd503201f)):
+    for i, w in enumerate((0xd503201f, 0xbd401610, 0x1e202208, 0x540000ed, 0x1e380208, 0x52800790, 0x1ac80e08, 0xd503201f, 0xd503201f, 0xb9021668, 0x3908b27f, 0xd503201f)):
         emit(ADRP(16, here(), FS_STATE_OFF) if i == 0 else B(here(), 0x69ccf8) if i == 11 else w)
     fs_put(0x69ccf4, [B(0x69ccf4, start2)], 'present interval lock (DM_FPS_TARGET)'); ctx.fps_lock = 1
 
